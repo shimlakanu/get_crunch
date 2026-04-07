@@ -6,6 +6,34 @@ const RECIPIENTS = [
   "shimlakanu@gmail.com",
 ];
 
+async function fetchTopPosts() {
+  const HN_BASE = "https://hacker-news.firebaseio.com/v0";
+  const idsRes = await fetch(`${HN_BASE}/topstories.json`);
+  const allIds = await idsRes.json();
+  const ids = allIds.slice(0, 200);
+
+  const stories = await Promise.all(
+    ids.map((id) =>
+      fetch(`${HN_BASE}/item/${id}.json`).then((r) => r.json())
+    )
+  );
+
+  return stories
+    .filter((s) => s && s.type === "story" && s.time)
+    .sort((a, b) => b.time - a.time)
+    .slice(0, 5)
+    .map((s) => ({
+      id: s.id,
+      title: s.title,
+      url: s.url || `https://news.ycombinator.com/item?id=${s.id}`,
+      score: s.score,
+      by: s.by,
+      comments: s.descendants || 0,
+      postedAt: new Date(s.time * 1000).toISOString(),
+      hnLink: `https://news.ycombinator.com/item?id=${s.id}`,
+    }));
+}
+
 function buildEmailHtml(posts) {
   const rows = posts
     .map(
@@ -40,9 +68,7 @@ function buildEmailHtml(posts) {
 export async function GET() {
   try {
     const resend = new Resend(process.env.RESEND_API_KEY);
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
-    const res = await fetch(`${baseUrl}/api/posts`);
-    const posts = await res.json();
+    const posts = await fetchTopPosts();
 
     if (!posts.length) {
       return Response.json({ error: "No posts fetched" }, { status: 500 });
