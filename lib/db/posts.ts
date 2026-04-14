@@ -1,4 +1,4 @@
-import { Collection, Document } from "mongodb";
+import { Collection } from "mongodb";
 import { getDb } from "./client";
 import { HnPost } from "@/app/api/posts/route";
 
@@ -15,8 +15,7 @@ export interface StoredPost extends HnPost {
   sentAt?: Date;                  // when this post was included in an email
 }
 
-// PostEnrichment: added Day 4, defined here so the StoredPost type is stable.
-// Defining it now prevents TypeScript errors when you reference it later.
+// PostEnrichment: will add it later, defined here so the StoredPost type is stable.
 export interface PostEnrichment {
   keyInsight: string;
   controversyScore: number;
@@ -60,7 +59,7 @@ export async function storePosts(posts: HnPost[]): Promise<void> {
 }
 
 // updatePostScore: add AI scoring fields to an existing post document.
-// Called after Gemini returns scores for a batch.
+// Called after agent returns scores for a batch.
 export async function updatePostScore(
   postId: number,
   score: number,

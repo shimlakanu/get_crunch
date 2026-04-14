@@ -1,11 +1,11 @@
 // lib/ai/test-fireworks.ts
 // Temporary — delete after 0.5.4 succeeds.
-import { generateText, generateJson, embedText } from "./fireworks";
+import { generateScore, generateJson, embedText } from "./fireworks";
 
 async function main() {
-  console.log("Testing generateText...");
-  const text = await generateText('Say exactly: "get-crunch AI is ready"');
-  console.log("✓ Text:", text);
+  console.log("Testing generateScore...");
+  const text = await generateScore('Say exactly: "get-crunch AI is ready"');
+  console.log("✓ Score:", text);
 
   console.log("\nTesting generateJson...");
   const parsed = await generateJson<{ status: string }>(

@@ -25,7 +25,7 @@ const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
 // deepseek-v3: Fireworks' recommended fast flagship model.
 // Strong reasoning quality at low latency — good fit for structured scoring.
 // temperature 0.4: consistent outputs without being fully deterministic.
-export async function generateText(prompt: string): Promise<string> {
+export async function generateScore(prompt: string): Promise<string> {
   const res = await fireworks.chat.completions.create({
     model: SCORING_MODEL,
     temperature: 0.4,
@@ -40,10 +40,10 @@ export async function generateText(prompt: string): Promise<string> {
 // response_format: { type: "json_object" } is the OpenAI-style JSON mode —
 // Fireworks supports it natively. Guarantees parseable JSON, no markdown fences,
 // no preamble. temperature 0.1 for tight, consistent structure.
-export async function generateJson<T>(prompt: string): Promise<T> {
+export async function generateJson<T>(prompt: string, temperature = 0.1): Promise<T> {
   const res = await fireworks.chat.completions.create({
     model: SCORING_MODEL,
-    temperature: 0.1,
+    temperature,
     max_tokens: 4096,
     response_format: { type: "json_object" },
     messages: [{ role: "user", content: prompt }],
