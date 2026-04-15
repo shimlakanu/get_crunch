@@ -1,8 +1,7 @@
 // app/api/send/route.ts
-import { runDailyDigest } from "@/lib/digest/run-daily-digest";
-
 export async function GET(): Promise<Response> {
   try {
+    const { runDailyDigest } = await import("@/lib/digest/run-daily-digest");
     const result = await runDailyDigest();
     return Response.json({
       success: true,

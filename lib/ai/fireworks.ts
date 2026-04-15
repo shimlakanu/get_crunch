@@ -1,9 +1,28 @@
 // lib/ai/fireworks.ts
 import OpenAI from "openai";
+import type { BatchScoreResponse, ConsistencyScoreJson } from "@/lib/types";
 
-// Fireworks is OpenAI-API-compatible.
-// Instead of a Fireworks-specific SDK, we just point the OpenAI client
-// at Fireworks' base URL. Same interface, different models and pricing.
+const BATCH_SCORE_SCHEMA = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      id:        { type: "number" },
+      score:     { type: "number" },
+      reasoning: { type: "string" },
+    },
+    required: ["id", "score", "reasoning"],
+  },
+};
+
+const CONSISTENCY_SCORE_SCHEMA = {
+  type: "object",
+  properties: {
+    score: { type: "number" },
+    reasoning: { type: "string" },
+  },
+  required: ["score", "reasoning"],
+};
 
 if (!process.env.FIREWORKS_API_KEY) {
   throw new Error(
@@ -16,41 +35,99 @@ export const fireworks = new OpenAI({
   baseURL: "https://api.fireworks.ai/inference/v1",
 });
 
-// Model IDs
-// All Fireworks models are namespaced under accounts/fireworks/models/
 const SCORING_MODEL = "accounts/fireworks/models/deepseek-v3p2";
 const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
 
-// fireworksChat: use for post scoring and comparison tasks.
-// deepseek-v3: Fireworks' recommended fast flagship model.
-// Strong reasoning quality at low latency — good fit for structured scoring.
-// temperature 0.4: consistent outputs without being fully deterministic.
-export async function generateScore(prompt: string): Promise<string> {
-  const res = await fireworks.chat.completions.create({
-    model: SCORING_MODEL,
-    temperature: 0.4,
-    max_tokens: 2048,
-    messages: [{ role: "user", content: prompt }],
-  });
 
-  return res.choices[0].message.content ?? "";
+function getClient(): OpenAI {
+  const apiKey = process.env.FIREWORKS_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "FIREWORKS_API_KEY is not set. Add it to .env.local and Vercel environment variables."
+    );
+  }
+  return new OpenAI({
+    apiKey,
+    baseURL: "https://api.fireworks.ai/inference/v1",
+  });
 }
 
-// fireworksJson: same model but forces valid JSON output.
-// response_format: { type: "json_object" } is the OpenAI-style JSON mode —
-// Fireworks supports it natively. Guarantees parseable JSON, no markdown fences,
-// no preamble. temperature 0.1 for tight, consistent structure.
-export async function generateJson<T>(prompt: string, temperature = 0.1): Promise<T> {
-  const res = await fireworks.chat.completions.create({
+function parseJsonWithRecovery<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const firstBrace = raw.indexOf("{");
+    const lastBrace = raw.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const objectCandidate = raw.slice(firstBrace, lastBrace + 1);
+      try {
+        return JSON.parse(objectCandidate) as T;
+      } catch {
+        // Continue and try array extraction.
+      }
+    }
+
+    const firstBracket = raw.indexOf("[");
+    const lastBracket = raw.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket > firstBracket) {
+      const arrayCandidate = raw.slice(firstBracket, lastBracket + 1);
+      return JSON.parse(arrayCandidate) as T;
+    }
+
+    return fallback;
+  }
+}
+
+export async function generateScore(prompt: string, temperature: number = 0.4): Promise<BatchScoreResponse[]> {
+  const res = await getClient().chat.completions.create({
     model: SCORING_MODEL,
-    temperature,
-    max_tokens: 4096,
-    response_format: { type: "json_object" },
+    temperature: temperature,
+    max_tokens: 4096, 
     messages: [{ role: "user", content: prompt }],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "BatchScoreResponse",
+        schema: BATCH_SCORE_SCHEMA,
+      },
+    }  as unknown as OpenAI.ChatCompletionCreateParams["response_format"],
   });
 
-  const text = res.choices[0].message.content ?? "{}";
-  return JSON.parse(text) as T;
+  const raw = res.choices[0].message.content ?? "[]";
+  return parseJsonWithRecovery<BatchScoreResponse[]>(raw, []);
+}
+
+export async function generateConsistencyScore(
+  prompt: string,
+  temperature: number = 0.6
+): Promise<ConsistencyScoreJson> {
+  const res = await getClient().chat.completions.create({
+    model: SCORING_MODEL,
+    temperature,
+    max_tokens: 1024,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Return exactly one valid JSON object and nothing else. Do not include explanations, markdown, or step-by-step analysis.",
+      },
+      { role: "user", content: prompt },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "ConsistencyScoreResponse",
+        schema: CONSISTENCY_SCORE_SCHEMA,
+      },
+    } as unknown as OpenAI.ChatCompletionCreateParams["response_format"],
+  });
+
+  const raw = res.choices[0].message.content ?? "{}";
+  const parsed = parseJsonWithRecovery<Partial<ConsistencyScoreJson>>(raw, {});
+  if (typeof parsed.score !== "number") {
+    throw new Error(`Consistency response missing numeric score. Raw output: ${raw}`);
+  }
+  return { score: parsed.score };
 }
 
 // fireworksEmbed: converts text to a vector for semantic similarity.

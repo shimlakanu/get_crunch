@@ -1,28 +1,7 @@
 import { Collection } from "mongodb";
 import { getDb } from "./client";
-import { HnPost } from "@/app/api/posts/route";
+import type { HnPost, StoredPost } from "@/lib/types";
 
-// StoredPost: what we actually persist in MongoDB.
-// Extends HnPost with AI scoring fields that get added during curation.
-// Fields optional because a freshly fetched post doesn't have scores yet.
-export interface StoredPost extends HnPost {
-  aiScore?: number;
-  reasoning?: string;
-  consistencyConfidence?: number; // only present on posts that went through self-consistency
-  embedding?: number[];           // added Day 2
-  enrichment?: PostEnrichment;    // added Day 4
-  fetchedAt: Date;                // when this post was retrieved from HN API
-  sentAt?: Date;                  // when this post was included in an email
-}
-
-// PostEnrichment: will add it later, defined here so the StoredPost type is stable.
-export interface PostEnrichment {
-  keyInsight: string;
-  controversyScore: number;
-  consensusView: string;
-  commentHighlight: string;
-  enrichedAt: Date;
-}
 
 async function getPostsCollection(): Promise<Collection<StoredPost>> {
   const db = await getDb();

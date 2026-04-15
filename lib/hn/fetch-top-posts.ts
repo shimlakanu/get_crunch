@@ -31,7 +31,7 @@ export async function fetchTopPostsAndPersist(): Promise<HnPost[]> {
       s !== null && s.type === "story" && !!s.time && !!s.title
     )
     .sort((a, b) => b.score - a.score)
-    .slice(0, 100)
+    .slice(0, 50)
     .map((s) => ({
       id: s.id,
       title: s.title,

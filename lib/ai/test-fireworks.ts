@@ -1,17 +1,11 @@
 // lib/ai/test-fireworks.ts
 // Temporary — delete after 0.5.4 succeeds.
-import { generateScore, generateJson, embedText } from "./fireworks";
+import { generateScore, embedText } from "./fireworks";
 
 async function main() {
   console.log("Testing generateScore...");
   const text = await generateScore('Say exactly: "get-crunch AI is ready"');
   console.log("✓ Score:", text);
-
-  console.log("\nTesting generateJson...");
-  const parsed = await generateJson<{ status: string }>(
-    'Return a JSON object with one key "status" and value "ready"'
-  );
-  console.log("✓ JSON:", parsed);
 
   console.log("\nTesting embedText...");
   const vector = await embedText("Hacker News post about Rust");

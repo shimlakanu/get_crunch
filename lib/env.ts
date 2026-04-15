@@ -21,7 +21,6 @@ function requireEnv(key: string): string {
 export const env = {
   RESEND_API_KEY: requireEnv("RESEND_API_KEY"),
   MONGODB_URI: requireEnv("MONGODB_URI"),
-  GOOGLE_AI_KEY: requireEnv("GOOGLE_AI_KEY"),
   // BASE_URL has a safe default for local dev, so it's not "required"
   BASE_URL: process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000",
 } as const;
