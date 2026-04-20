@@ -1,33 +1,52 @@
 // lib/ai/curator.ts
-import { fireworks, generateScore } from "./fireworks";
+import { requestSchemaCompletion } from "./fireworks";
 import { SCORING_PROMPT, CONSISTENCY_PROMPT } from "./prompts";
 import type { HnPost } from "@/lib/types";
 import { updatePostScore } from "@/lib/db/posts";
 import type { BatchScoreResponse, ScoredPost } from "@/lib/types";
-import { z } from "zod";
+import { runStructuredOutputPipeline } from "./structured-output";
+import {
+  BATCH_SCORE_SCHEMA,
+  batchScoreZodSchema,
+  SELF_CONSISTENCY_REQUIRED_KEYS,
+  SELF_CONSISTENCY_SCHEMA,
+  selfConsistencyZodSchema,
+} from "./ai-schemas";
 
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 3;
 
 const UNCERTAINTY_MIN = 6;
 const UNCERTAINTY_MAX = 8;
+const SCORING_ATTEMPTS = 3;
 const SELF_CONSISTENCY_ATTEMPTS = 3;
+const STRICT_JSON_SYSTEM_PROMPT =
+  "Return exactly one valid JSON value and nothing else. No markdown, no commentary.";
 
-const SELF_CONSISTENCY_SCHEMA = {
-  type: "object",
-  properties: {
-    score: { type: "number" },
-    reasoning: { type: "string" },
-    consistencyConfidence: { type: "number" },
-  },
-  required: ["score", "reasoning", "consistencyConfidence"],
-} as const;
+async function requestStructuredOutput(args: {
+  prompt: string;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  temperature: number;
+  maxTokens: number;
+}): Promise<string> {
+  return requestSchemaCompletion({
+    prompt: args.prompt,
+    schemaName: args.schemaName,
+    schema: args.schema,
+    temperature: args.temperature,
+    maxTokens: args.maxTokens,
+    systemPrompt: STRICT_JSON_SYSTEM_PROMPT,
+  });
+}
 
-const selfConsistencyZodSchema = z.object({
-  score: z.number(),
-  reasoning: z.string().min(1),
-  consistencyConfidence: z.number(),
-});
+function normalizeBatchScores(scores: BatchScoreResponse[]): BatchScoreResponse[] {
+  return scores.map((score) => ({
+    id: score.id,
+    score: Math.min(10, Math.max(0, Math.round(score.score))),
+    reasoning: score.reasoning.trim(),
+  }));
+}
 
 async function scoreBatch(posts: HnPost[]): Promise<BatchScoreResponse[]> {
   const postsForPrompt = posts.map((p) => ({
@@ -41,42 +60,37 @@ async function scoreBatch(posts: HnPost[]): Promise<BatchScoreResponse[]> {
   console.log(`[curator] Scoring batch of ${postsForPrompt[0].title}  ${postsForPrompt[0].id}`);
 
   const prompt = `${SCORING_PROMPT}\n\nPosts to score:\n${JSON.stringify(postsForPrompt, null, 2)}`;
+  const result = await runStructuredOutputPipeline<BatchScoreResponse[]>({
+    basePrompt: prompt,
+    attempts: SCORING_ATTEMPTS,
+    schema: BATCH_SCORE_SCHEMA,
+    zodSchema: batchScoreZodSchema,
+    request: (nextPrompt) =>
+      requestStructuredOutput({
+        prompt: nextPrompt,
+        schemaName: "BatchScoreResponse",
+        schema: BATCH_SCORE_SCHEMA,
+        temperature: 0.3,
+        maxTokens: 4096,
+      }),
+  });
 
-  let attempts = 0;
-  const MAX_ATTEMPTS = 3;
-
-  while (attempts < MAX_ATTEMPTS) {
-    try {
-      const scores = await generateScore(prompt, 0.4);
-      console.log(`[curator] scored batch at attempt ${attempts + 1} successfully`);
-      return scores;
-    } catch (err) {
-      attempts++;
-      if (attempts === MAX_ATTEMPTS) throw err;
-        const isOverloaded = err instanceof Error && err.message.includes("503");
-        const delay = isOverloaded
-      ? Math.min(1000 * 2 ** attempts, 3000) // 2s, 4s, 8s... cap at 30s
-      : 2000;
-
-    console.warn(`[curator] Batch failed (attempt ${attempts}), retrying in ${delay}ms...`);
-    await new Promise((r) => setTimeout(r, delay));
+  if (result.data) {
+    if (result.failures.length > 0) {
+      console.warn("[curator] scoreBatch recovered after retries", {
+        batchSize: postsForPrompt.length,
+        attemptsUsed: result.attemptsUsed,
+        failures: result.failures,
+      });
     }
+    return normalizeBatchScores(result.data);
   }
-  throw new Error("Failed to score batch after all attempts");
-}
 
-function parseJsonWithRecovery(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const firstBrace = raw.indexOf("{");
-    const lastBrace = raw.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const candidate = raw.slice(firstBrace, lastBrace + 1);
-      return JSON.parse(candidate);
-    }
-    throw new Error("No JSON object found in model output.");
-  }
+  console.error("[curator] scoreBatch failed after retries", {
+    batchSize: postsForPrompt.length,
+    failures: result.failures,
+  });
+  return [];
 }
 
 function normalizeConsistencyScore(score: number): number {
@@ -95,94 +109,34 @@ Title: ${post.title}
 Post Score: ${post.score}
 Comments: ${post.comments}
 Domain: ${extractDomain(post.url)}`;
+  const result = await runStructuredOutputPipeline({
+    basePrompt,
+    attempts: SELF_CONSISTENCY_ATTEMPTS,
+    schema: SELF_CONSISTENCY_SCHEMA,
+    requiredObjectKeys: [...SELF_CONSISTENCY_REQUIRED_KEYS],
+    zodSchema: selfConsistencyZodSchema,
+    request: (nextPrompt) =>
+      requestStructuredOutput({
+        prompt: nextPrompt,
+        schemaName: "SelfConsistencyResult",
+        schema: SELF_CONSISTENCY_SCHEMA,
+        temperature: 0.2,
+        maxTokens: 1024,
+      }),
+  });
 
-  const failures: Array<Record<string, unknown>> = [];
-  let correctionFeedback = "";
+  if (result.data) {
+    post.aiScore = normalizeConsistencyScore(result.data.score);
+    post.reasoning = result.data.reasoning.trim();
+    post.consistencyConfidence = normalizeConfidence(result.data.consistencyConfidence);
 
-  for (let attempt = 1; attempt <= SELF_CONSISTENCY_ATTEMPTS; attempt++) {
-    const userPrompt =
-      correctionFeedback.length > 0 ? `${basePrompt}\n\n${correctionFeedback}` : basePrompt;
-
-    let raw = "";
-    try {
-      const res = await fireworks.chat.completions.create({
-        model: "accounts/fireworks/models/deepseek-v3p2",
-        temperature: 0.5,
-        max_tokens: 1024,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Return exactly one valid JSON object and nothing else. No markdown. No extra text.",
-          },
-          { role: "user", content: userPrompt },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "SelfConsistencyResult",
-            schema: SELF_CONSISTENCY_SCHEMA,
-          },
-        } as unknown as Parameters<typeof fireworks.chat.completions.create>[0]["response_format"],
-      });
-      raw = res.choices[0]?.message?.content ?? "";
-    } catch (err) {
-      failures.push({
-        attempt,
-        stage: "llm_request",
-        error: err instanceof Error ? err.message : String(err),
-      });
-      correctionFeedback = `Your previous response was invalid JSON.
-Return ONLY valid JSON matching this schema:
-${JSON.stringify(SELF_CONSISTENCY_SCHEMA)}`;
-      continue;
-    }
-
-    let recovered: unknown;
-    try {
-      recovered = parseJsonWithRecovery(raw);
-    } catch (err) {
-      failures.push({
-        attempt,
-        stage: "json_recovery",
-        error: err instanceof Error ? err.message : String(err),
-        raw,
-      });
-      correctionFeedback = `Your previous response was invalid JSON.
-Return ONLY valid JSON matching this schema:
-${JSON.stringify(SELF_CONSISTENCY_SCHEMA)}`;
-      continue;
-    }
-
-    const validated = selfConsistencyZodSchema.safeParse(recovered);
-    if (!validated.success) {
-      failures.push({
-        attempt,
-        stage: "zod_validation",
-        errors: validated.error.issues,
-        raw,
-      });
-      correctionFeedback = `Your previous response was invalid JSON.
-Return ONLY valid JSON matching this schema:
-${JSON.stringify(SELF_CONSISTENCY_SCHEMA)}`;
-      continue;
-    }
-
-    const normalizedScore = normalizeConsistencyScore(validated.data.score);
-    const normalizedConfidence = normalizeConfidence(validated.data.consistencyConfidence);
-
-    post.aiScore = normalizedScore;
-    post.reasoning = validated.data.reasoning.trim();
-    post.consistencyConfidence = normalizedConfidence;
-
-    if (failures.length > 0) {
+    if (result.failures.length > 0) {
       console.warn("[curator] selfConsistency recovered after retries", {
         postId: post.id,
-        attemptsUsed: attempt,
-        failures,
+        attemptsUsed: result.attemptsUsed,
+        failures: result.failures,
       });
     }
-
     return post;
   }
 
@@ -193,7 +147,7 @@ ${JSON.stringify(SELF_CONSISTENCY_SCHEMA)}`;
 
   console.error("[curator] selfConsistency failed after retries", {
     postId: post.id,
-    failures,
+    failures: result.failures,
   });
 
   return post;
@@ -235,20 +189,20 @@ export async function curateAndRank(posts: HnPost[]): Promise<ScoredPost[]> {
   console.log(`[curator] Scored ${scoredPosts.length} posts`);
 
   // Step 3: self-consistency for uncertain posts
-  const uncertainPosts = scoredPosts.filter(
-    (p) => p.aiScore >= UNCERTAINTY_MIN && p.aiScore <= UNCERTAINTY_MAX
-  );
+//   const uncertainPosts = scoredPosts.filter(
+//     (p) => p.aiScore >= UNCERTAINTY_MIN && p.aiScore <= UNCERTAINTY_MAX
+//   );
 
-  console.log(`[curator] Running self-consistency on ${uncertainPosts.length} uncertain posts`);
+//   console.log(`[curator] Running self-consistency on ${uncertainPosts.length} uncertain posts`);
 
-  for (const post of uncertainPosts) {
-    await selfConsistency(post);
+//   for (const post of uncertainPosts) {
+    // await selfConsistency(post);
 
     // Update MongoDB — reasoning stays the same, only score and confidence update
-    await updatePostScore(post.id, post.aiScore, post.reasoning, post.consistencyConfidence ?? 0);
+//  await updatePostScore(post.id, post.aiScore, post.reasoning, post.consistencyConfidence ?? 0);
 
-    await new Promise((r) => setTimeout(r, 500));
-  }
+    // await new Promise((r) => setTimeout(r, 500));
+//   }
 
   // Step 4: sort by final AI score, return top posts
   return scoredPosts.sort((a, b) => b.aiScore - a.aiScore);

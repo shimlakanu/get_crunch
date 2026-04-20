@@ -3,7 +3,6 @@
 // Until then, everyone gets the same digest.
 export const DIGEST_RECIPIENTS = [
   "shimla06@student.sust.edu",
-  "royantar1@gmail.com",
   "shimlakanu@gmail.com",
 ] as const;
 

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "db:test": "npx tsx lib/db/test-connection.ts",
-    "ai:test": "npx tsx lib/ai/test-fireworks.ts"
+    "ai:test": "npx tsx lib/ai/test-fireworks.ts",
+    "ai:embed": "npx tsx lib/ai/test-embed.ts"
   },
   "dependencies": {
     "mongodb": "^7.1.1",

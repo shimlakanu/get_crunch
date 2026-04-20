@@ -1,28 +1,8 @@
 // lib/ai/fireworks.ts
 import OpenAI from "openai";
 import type { BatchScoreResponse, ConsistencyScoreJson } from "@/lib/types";
-
-const BATCH_SCORE_SCHEMA = {
-  type: "array",
-  items: {
-    type: "object",
-    properties: {
-      id:        { type: "number" },
-      score:     { type: "number" },
-      reasoning: { type: "string" },
-    },
-    required: ["id", "score", "reasoning"],
-  },
-};
-
-const CONSISTENCY_SCORE_SCHEMA = {
-  type: "object",
-  properties: {
-    score: { type: "number" },
-    reasoning: { type: "string" },
-  },
-  required: ["score", "reasoning"],
-};
+import { parseJsonWithRecovery } from "./structured-output";
+import { BATCH_SCORE_SCHEMA, SELF_CONSISTENCY_SCHEMA } from "./ai-schemas";
 
 if (!process.env.FIREWORKS_API_KEY) {
   throw new Error(
@@ -35,7 +15,7 @@ export const fireworks = new OpenAI({
   baseURL: "https://api.fireworks.ai/inference/v1",
 });
 
-const SCORING_MODEL = "accounts/fireworks/models/deepseek-v3p2";
+export const SCORING_MODEL = "accounts/fireworks/models/deepseek-v3p2";
 const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
 
 
@@ -52,82 +32,70 @@ function getClient(): OpenAI {
   });
 }
 
-function parseJsonWithRecovery<T>(raw: string, fallback: T): T {
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    const firstBrace = raw.indexOf("{");
-    const lastBrace = raw.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const objectCandidate = raw.slice(firstBrace, lastBrace + 1);
-      try {
-        return JSON.parse(objectCandidate) as T;
-      } catch {
-        // Continue and try array extraction.
-      }
-    }
-
-    const firstBracket = raw.indexOf("[");
-    const lastBracket = raw.lastIndexOf("]");
-    if (firstBracket !== -1 && lastBracket > firstBracket) {
-      const arrayCandidate = raw.slice(firstBracket, lastBracket + 1);
-      return JSON.parse(arrayCandidate) as T;
-    }
-
-    return fallback;
-  }
+interface RequestSchemaCompletionOptions {
+  prompt: string;
+  schemaName: string;
+  schema: Record<string, unknown>;
+  temperature: number;
+  maxTokens: number;
+  systemPrompt?: string;
 }
 
-export async function generateScore(prompt: string, temperature: number = 0.4): Promise<BatchScoreResponse[]> {
+export async function requestSchemaCompletion(
+  options: RequestSchemaCompletionOptions
+): Promise<string> {
   const res = await getClient().chat.completions.create({
     model: SCORING_MODEL,
-    temperature: temperature,
-    max_tokens: 4096, 
-    messages: [{ role: "user", content: prompt }],
+    temperature: options.temperature,
+    max_tokens: options.maxTokens,
+    messages: [
+      ...(options.systemPrompt ? [{ role: "system" as const, content: options.systemPrompt }] : []),
+      { role: "user", content: options.prompt },
+    ],
     response_format: {
       type: "json_schema",
       json_schema: {
-        name: "BatchScoreResponse",
-        schema: BATCH_SCORE_SCHEMA,
+        name: options.schemaName,
+        schema: options.schema,
       },
-    }  as unknown as OpenAI.ChatCompletionCreateParams["response_format"],
+    } as unknown as OpenAI.ChatCompletionCreateParams["response_format"],
   });
 
-  const raw = res.choices[0].message.content ?? "[]";
-  return parseJsonWithRecovery<BatchScoreResponse[]>(raw, []);
+  return res.choices[0]?.message?.content ?? "";
+}
+
+export async function generateScore(prompt: string, temperature: number = 0.4): Promise<BatchScoreResponse[]> {
+  const raw = await requestSchemaCompletion({
+    prompt,
+    schemaName: "BatchScoreResponse",
+    schema: BATCH_SCORE_SCHEMA,
+    temperature,
+    maxTokens: 4096,
+  });
+  return parseJsonWithRecovery(raw) as BatchScoreResponse[];
 }
 
 export async function generateConsistencyScore(
   prompt: string,
   temperature: number = 0.6
 ): Promise<ConsistencyScoreJson> {
-  const res = await getClient().chat.completions.create({
-    model: SCORING_MODEL,
+  const raw = await requestSchemaCompletion({
+    prompt,
+    schemaName: "ConsistencyScoreResponse",
+    schema: SELF_CONSISTENCY_SCHEMA,
     temperature,
-    max_tokens: 1024,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Return exactly one valid JSON object and nothing else. Do not include explanations, markdown, or step-by-step analysis.",
-      },
-      { role: "user", content: prompt },
-    ],
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "ConsistencyScoreResponse",
-        schema: CONSISTENCY_SCORE_SCHEMA,
-      },
-    } as unknown as OpenAI.ChatCompletionCreateParams["response_format"],
+    maxTokens: 1024,
+    systemPrompt:
+      "Return exactly one valid JSON object and nothing else. Do not include explanations, markdown, or step-by-step analysis.",
   });
-
-  const raw = res.choices[0].message.content ?? "{}";
-  const parsed = parseJsonWithRecovery<Partial<ConsistencyScoreJson>>(raw, {});
+  const parsed = parseJsonWithRecovery(raw) as Partial<{
+    score: number;
+    consistencyConfidence: number;
+  }>;
   if (typeof parsed.score !== "number") {
     throw new Error(`Consistency response missing numeric score. Raw output: ${raw}`);
   }
-  return { score: parsed.score };
+  return { score: parsed.score, confidence: parsed.consistencyConfidence };
 }
 
 // fireworksEmbed: converts text to a vector for semantic similarity.
@@ -135,10 +103,16 @@ export async function generateConsistencyScore(
 // free-tier friendly on Fireworks. Same model referenced in Fireworks' own RAG docs.
 // Drop-in replacement for Google's text-embedding-004.
 export async function embedText(text: string): Promise<number[]> {
+  // Fireworks matryoshka models default to a short slice (e.g. 192) unless dimensions is set.
+  // Use explicit float encoding: openai-node defaults to base64 + decode, which can mis-handle
+  // some provider payloads; float + dimensions matches Fireworks' OpenAPI.
   const res = await fireworks.embeddings.create({
     model: EMBEDDING_MODEL,
     input: text,
+    dimensions: 768,
+    encoding_format: "float",
   });
 
-  return res.data[0].embedding;
+  const emb = res.data[0].embedding;
+  return Array.isArray(emb) ? emb : Array.from(emb as ArrayLike<number>);
 }
