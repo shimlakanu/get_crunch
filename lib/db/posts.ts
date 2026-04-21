@@ -58,6 +58,15 @@ export async function updatePostScore(
   );
 }
 
+// updatePostEmbedding: persist the semantic vector for a post (768 dims with current model).
+export async function updatePostEmbedding(
+  postId: number,
+  embedding: number[]
+): Promise<void> {
+  const collection = await getPostsCollection();
+  await collection.updateOne({ id: postId }, { $set: { embedding } });
+}
+
 // getTopScoredPosts: retrieve the N highest-scored posts from today's fetch.
 // "Today" = fetched within the last 4 hours (2 cron runs per day means
 // the freshest batch is always within 12 hours, but 4 hours is a safe window).

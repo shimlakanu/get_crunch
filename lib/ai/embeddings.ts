@@ -15,4 +15,5 @@ function getSourceDomain(url: string): string {
 export function buildEmbeddingText(post: HnPost): string {
   const source = getSourceDomain(post.url);
   return `Hacker News post: ${post.title} (source: ${source})`;
+
 }
