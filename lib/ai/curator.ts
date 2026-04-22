@@ -1,8 +1,9 @@
 // lib/ai/curator.ts
 import { requestSchemaCompletion } from "./fireworks";
-import { SCORING_PROMPT, CONSISTENCY_PROMPT } from "./prompts";
+import { buildScoringPrompt, CONSISTENCY_PROMPT } from "./prompts";
 import type { HnPost } from "@/lib/types";
 import { updatePostScore } from "@/lib/db/posts";
+import { findSimilarSentPosts } from "@/lib/db/vector-search";
 import type { BatchScoreResponse, ScoredPost } from "@/lib/types";
 import { runStructuredOutputPipeline } from "./structured-output";
 import {
@@ -15,6 +16,13 @@ import {
 
 
 const BATCH_SIZE = 3;
+const DEFAULT_SIMILARITY_SEED_N = 5;
+const SIMILAR_SENT_LIMIT = 10;
+
+export type CurateAndRankOptions = {
+  /** Seed posts (domain round-robin) for vector similarity; default 5. <=0 skips similarity context. */
+  sampleSize?: number;
+};
 
 const UNCERTAINTY_MIN = 6;
 const UNCERTAINTY_MAX = 8;
@@ -48,7 +56,10 @@ function normalizeBatchScores(scores: BatchScoreResponse[]): BatchScoreResponse[
   }));
 }
 
-async function scoreBatch(posts: HnPost[]): Promise<BatchScoreResponse[]> {
+async function scoreBatch(
+  posts: HnPost[],
+  scoringPreamble: string
+): Promise<BatchScoreResponse[]> {
   const postsForPrompt = posts.map((p) => ({
     id: p.id,
     title: p.title,
@@ -57,9 +68,12 @@ async function scoreBatch(posts: HnPost[]): Promise<BatchScoreResponse[]> {
     domain: extractDomain(p.url),
   }));
 
-  console.log(`[curator] Scoring batch of ${postsForPrompt[0].title}  ${postsForPrompt[0].id}`);
+  const first = postsForPrompt[0];
+  console.log(
+    `[curator] Scoring batch of ${first ? `${first.title}  ${first.id}` : "(empty)"}`
+  );
 
-  const prompt = `${SCORING_PROMPT}\n\nPosts to score:\n${JSON.stringify(postsForPrompt, null, 2)}`;
+  const prompt = `${scoringPreamble}\n\nPosts to score:\n${JSON.stringify(postsForPrompt, null, 2)}`;
   const result = await runStructuredOutputPipeline<BatchScoreResponse[]>({
     basePrompt: prompt,
     attempts: SCORING_ATTEMPTS,
@@ -155,8 +169,46 @@ Domain: ${extractDomain(post.url)}`;
 
 // curateAndRank: the main function — takes raw posts, returns scored + sorted posts.
 // This is what the cron route calls.
-export async function curateAndRank(posts: HnPost[]): Promise<ScoredPost[]> {
+export async function curateAndRank(
+  posts: HnPost[],
+  options?: CurateAndRankOptions
+): Promise<ScoredPost[]> {
   console.log(`[curator] Scoring ${posts.length} posts in batches of ${BATCH_SIZE}`);
+
+  const sampleSize = options?.sampleSize ?? DEFAULT_SIMILARITY_SEED_N;
+  let scoringPreamble = buildScoringPrompt([]);
+
+  // sampleSize <= 0 skips vector similarity and keeps the base-only scoring rubric.
+  if (sampleSize > 0) {
+    const seeds = selectDiverseSample(posts, sampleSize);
+    try {
+      const resultLists = await Promise.all(
+        seeds.map((p) => findSimilarSentPosts(p.title, { limit: SIMILAR_SENT_LIMIT }))
+      );
+      const dedupedTitles: string[] = [];
+      const titleKeys = new Set<string>();
+      for (const hits of resultLists) {
+        for (const h of hits) {
+          const t = h.title?.trim() ?? "";
+          if (!t) continue;
+          const key = t.toLowerCase();
+          if (titleKeys.has(key)) continue;
+          titleKeys.add(key);
+          dedupedTitles.push(t);
+        }
+      }
+      console.log(`[curator] Deduped: ${dedupedTitles.length} titles`);
+      scoringPreamble = buildScoringPrompt(dedupedTitles);
+      console.log(
+        `[curator] Similarity seeds=${seeds.length}, deduped recent-sent titles=${dedupedTitles.length}`
+      );
+    } catch (err) {
+      console.warn(
+        "[curator] findSimilarSentPosts failed; scoring without recent-sent context",
+        err
+      );
+    }
+  }
 
   // Step 1: batch score all posts
   const allScores: BatchScoreResponse[] = [];
@@ -165,7 +217,7 @@ export async function curateAndRank(posts: HnPost[]): Promise<ScoredPost[]> {
     const batch = posts.slice(i, i + BATCH_SIZE);
     console.log(`[curator] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(posts.length / BATCH_SIZE)}`);
 
-    const batchScores = await scoreBatch(batch);
+    const batchScores = await scoreBatch(batch, scoringPreamble);
     allScores.push(...batchScores);
     if (i + BATCH_SIZE < posts.length) {
       await new Promise((r) => setTimeout(r, 3000));
@@ -218,4 +270,40 @@ function extractDomain(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** Pick up to `n` posts by round-robin across URL domains (deterministic, without replacement). */
+export function selectDiverseSample(hnPosts: HnPost[], n: number): HnPost[] {
+  if (hnPosts.length === 0 || n <= 0) return [];
+  if (hnPosts.length <= n) return [...hnPosts];
+
+  const buckets = new Map<string, HnPost[]>();
+  for (const p of hnPosts) {
+    const d = extractDomain(p.url);
+    const list = buckets.get(d);
+    if (list) list.push(p);
+    else buckets.set(d, [p]);
+  }
+
+  const domainOrder = [...buckets.keys()].sort((a, b) => a.localeCompare(b));
+  const picked: HnPost[] = [];
+  const nextIndex = new Map<string, number>();
+  for (const d of domainOrder) nextIndex.set(d, 0);
+
+  while (picked.length < n) {
+    let progressed = false;
+    for (const d of domainOrder) {
+      const list = buckets.get(d)!;
+      const i = nextIndex.get(d)!;
+      if (i < list.length) {
+        picked.push(list[i]!);
+        nextIndex.set(d, i + 1);
+        progressed = true;
+        if (picked.length >= n) break;
+      }
+    }
+    if (!progressed) break;
+  }
+
+  return picked;
 }
