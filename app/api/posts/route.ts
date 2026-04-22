@@ -2,6 +2,7 @@
 import { buildEmbeddingText, embedText } from "@/lib/ai/embeddings";
 import { updatePostEmbedding } from "@/lib/db/posts";
 import { fetchTopPostsAndPersist } from "@/lib/hn/fetch-top-posts";
+import { logRouteErrorResponse } from "@/lib/http/route-error";
 
 export async function GET(): Promise<Response> {
   try {
@@ -13,8 +14,6 @@ export async function GET(): Promise<Response> {
     }
     return Response.json(posts);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[posts] Error:", message);
-    return Response.json({ error: message }, { status: 500 });
+    return logRouteErrorResponse(err, "posts");
   }
 }

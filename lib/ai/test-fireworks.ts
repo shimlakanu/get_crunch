@@ -15,7 +15,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("✗ Fireworks test failed:", err.message);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error("✗ Fireworks test failed:", msg);
   process.exit(1);
 });
 

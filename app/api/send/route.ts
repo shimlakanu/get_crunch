@@ -1,4 +1,6 @@
 // app/api/send/route.ts
+import { logRouteErrorResponse } from "@/lib/http/route-error";
+
 export async function GET(): Promise<Response> {
   try {
     const { runDailyDigest } = await import("@/lib/digest/run-daily-digest");
@@ -10,8 +12,6 @@ export async function GET(): Promise<Response> {
       topPosts: result.topPosts,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[send] Error:", message);
-    return Response.json({ error: message }, { status: 500 });
+    return logRouteErrorResponse(err, "send");
   }
 }

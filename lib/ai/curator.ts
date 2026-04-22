@@ -1,10 +1,12 @@
 // lib/ai/curator.ts
 import { requestSchemaCompletion } from "./fireworks";
-import { buildScoringPrompt, CONSISTENCY_PROMPT } from "./prompts";
-import type { HnPost } from "@/lib/types";
-import { updatePostScore } from "@/lib/db/posts";
-import { findSimilarSentPosts } from "@/lib/db/vector-search";
-import type { BatchScoreResponse, ScoredPost } from "@/lib/types";
+import { CONSISTENCY_PROMPT } from "./prompts";
+import {
+  DEFAULT_SIMILARITY_SEED_N,
+  resolveScoringPreambleContext,
+  type CurateAndRankOptions,
+} from "./scoring-preamble";
+import type { BatchScoreResponse, HnPost, ScoredPost } from "@/lib/types";
 import { runStructuredOutputPipeline } from "./structured-output";
 import {
   BATCH_SCORE_SCHEMA,
@@ -13,19 +15,12 @@ import {
   SELF_CONSISTENCY_SCHEMA,
   selfConsistencyZodSchema,
 } from "./ai-schemas";
+import { extractDomain } from "@/lib/url/extract-domain";
 
+export { selectDiverseSample } from "./select-diverse-sample";
+export type { CurateAndRankOptions } from "./scoring-preamble";
 
-const BATCH_SIZE = 3;
-const DEFAULT_SIMILARITY_SEED_N = 5;
-const SIMILAR_SENT_LIMIT = 10;
-
-export type CurateAndRankOptions = {
-  /** Seed posts (domain round-robin) for vector similarity; default 5. <=0 skips similarity context. */
-  sampleSize?: number;
-};
-
-const UNCERTAINTY_MIN = 6;
-const UNCERTAINTY_MAX = 8;
+const BATCH_SIZE = 5;
 const SCORING_ATTEMPTS = 3;
 const SELF_CONSISTENCY_ATTEMPTS = 3;
 const STRICT_JSON_SYSTEM_PROMPT =
@@ -176,55 +171,27 @@ export async function curateAndRank(
   console.log(`[curator] Scoring ${posts.length} posts in batches of ${BATCH_SIZE}`);
 
   const sampleSize = options?.sampleSize ?? DEFAULT_SIMILARITY_SEED_N;
-  let scoringPreamble = buildScoringPrompt([]);
-
   // sampleSize <= 0 skips vector similarity and keeps the base-only scoring rubric.
+  const ctx = await resolveScoringPreambleContext(posts, sampleSize);
   if (sampleSize > 0) {
-    const seeds = selectDiverseSample(posts, sampleSize);
-    try {
-      const resultLists = await Promise.all(
-        seeds.map((p) => findSimilarSentPosts(p.title, { limit: SIMILAR_SENT_LIMIT }))
-      );
-      const dedupedTitles: string[] = [];
-      const titleKeys = new Set<string>();
-      for (const hits of resultLists) {
-        for (const h of hits) {
-          const t = h.title?.trim() ?? "";
-          if (!t) continue;
-          const key = t.toLowerCase();
-          if (titleKeys.has(key)) continue;
-          titleKeys.add(key);
-          dedupedTitles.push(t);
-        }
-      }
-      console.log(`[curator] Deduped: ${dedupedTitles.length} titles`);
-      scoringPreamble = buildScoringPrompt(dedupedTitles);
-      console.log(
-        `[curator] Similarity seeds=${seeds.length}, deduped recent-sent titles=${dedupedTitles.length}`
-      );
-    } catch (err) {
-      console.warn(
-        "[curator] findSimilarSentPosts failed; scoring without recent-sent context",
-        err
-      );
-    }
+    console.log(
+      `[curator] Similarity seeds=${ctx.seedCount}, deduped recent-sent titles=${ctx.recentTitleCount}`
+    );
   }
 
-  // Step 1: batch score all posts
   const allScores: BatchScoreResponse[] = [];
 
   for (let i = 0; i < posts.length; i += BATCH_SIZE) {
     const batch = posts.slice(i, i + BATCH_SIZE);
     console.log(`[curator] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(posts.length / BATCH_SIZE)}`);
 
-    const batchScores = await scoreBatch(batch, scoringPreamble);
+    const batchScores = await scoreBatch(batch, ctx.preamble);
     allScores.push(...batchScores);
     if (i + BATCH_SIZE < posts.length) {
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
 
-  // Step 2: merge scores back into post objects
   const scoreMap = new Map(allScores.map((s) => [s.id, s]));
 
   const scoredPosts: ScoredPost[] = posts
@@ -236,74 +203,9 @@ export async function curateAndRank(
         reasoning: scoreData?.reasoning ?? "Score unavailable",
       };
     })
-    .filter((p) => p.aiScore > 0); 
+    .filter((p) => p.aiScore > 0);
 
   console.log(`[curator] Scored ${scoredPosts.length} posts`);
 
-  // Step 3: self-consistency for uncertain posts
-//   const uncertainPosts = scoredPosts.filter(
-//     (p) => p.aiScore >= UNCERTAINTY_MIN && p.aiScore <= UNCERTAINTY_MAX
-//   );
-
-//   console.log(`[curator] Running self-consistency on ${uncertainPosts.length} uncertain posts`);
-
-//   for (const post of uncertainPosts) {
-    // await selfConsistency(post);
-
-    // Update MongoDB — reasoning stays the same, only score and confidence update
-//  await updatePostScore(post.id, post.aiScore, post.reasoning, post.consistencyConfidence ?? 0);
-
-    // await new Promise((r) => setTimeout(r, 500));
-//   }
-
-  // Step 4: sort by final AI score, return top posts
   return scoredPosts.sort((a, b) => b.aiScore - a.aiScore);
-}
-
-// extractDomain: pull the domain from a URL for the scoring prompt.
-// "https://blog.example.com/post/123" → "blog.example.com"
-// Why include domain: the scoring model can use domain as a signal
-// (github.com → likely technical, substack.com → likely opinion).
-function extractDomain(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
-}
-
-/** Pick up to `n` posts by round-robin across URL domains (deterministic, without replacement). */
-export function selectDiverseSample(hnPosts: HnPost[], n: number): HnPost[] {
-  if (hnPosts.length === 0 || n <= 0) return [];
-  if (hnPosts.length <= n) return [...hnPosts];
-
-  const buckets = new Map<string, HnPost[]>();
-  for (const p of hnPosts) {
-    const d = extractDomain(p.url);
-    const list = buckets.get(d);
-    if (list) list.push(p);
-    else buckets.set(d, [p]);
-  }
-
-  const domainOrder = [...buckets.keys()].sort((a, b) => a.localeCompare(b));
-  const picked: HnPost[] = [];
-  const nextIndex = new Map<string, number>();
-  for (const d of domainOrder) nextIndex.set(d, 0);
-
-  while (picked.length < n) {
-    let progressed = false;
-    for (const d of domainOrder) {
-      const list = buckets.get(d)!;
-      const i = nextIndex.get(d)!;
-      if (i < list.length) {
-        picked.push(list[i]!);
-        nextIndex.set(d, i + 1);
-        progressed = true;
-        if (picked.length >= n) break;
-      }
-    }
-    if (!progressed) break;
-  }
-
-  return picked;
 }

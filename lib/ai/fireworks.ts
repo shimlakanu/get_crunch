@@ -4,14 +4,18 @@ import type { BatchScoreResponse, ConsistencyScoreJson } from "@/lib/types";
 import { parseJsonWithRecovery } from "./structured-output";
 import { BATCH_SCORE_SCHEMA, SELF_CONSISTENCY_SCHEMA } from "./ai-schemas";
 
-if (!process.env.FIREWORKS_API_KEY) {
-  throw new Error(
-    "FIREWORKS_API_KEY is not set. Add it to .env.local and Vercel environment variables."
-  );
+function requireFireworksApiKey(): string {
+  const key = process.env.FIREWORKS_API_KEY;
+  if (!key) {
+    throw new Error(
+      "FIREWORKS_API_KEY is not set. Add it to .env.local and Vercel environment variables."
+    );
+  }
+  return key;
 }
 
 export const fireworks = new OpenAI({
-  apiKey: process.env.FIREWORKS_API_KEY,
+  apiKey: requireFireworksApiKey(),
   baseURL: "https://api.fireworks.ai/inference/v1",
 });
 
@@ -20,16 +24,7 @@ const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
 
 
 function getClient(): OpenAI {
-  const apiKey = process.env.FIREWORKS_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "FIREWORKS_API_KEY is not set. Add it to .env.local and Vercel environment variables."
-    );
-  }
-  return new OpenAI({
-    apiKey,
-    baseURL: "https://api.fireworks.ai/inference/v1",
-  });
+  return fireworks;
 }
 
 interface RequestSchemaCompletionOptions {

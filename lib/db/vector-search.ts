@@ -45,6 +45,14 @@ function roundVectorScore(rows: SemanticSearchHit[]): SemanticSearchHit[] {
   }));
 }
 
+function requireTrimmedQuery(query: string, label: string): string {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    throw new Error(`${label} query must not be empty`);
+  }
+  return trimmed;
+}
+
 async function executeVectorSearch(
   trimmedQuery: string,
   options?: { limit?: number; numCandidates?: number; filter?: Document }
@@ -87,11 +95,7 @@ export async function semanticSearch(
   query: string,
   options?: { limit?: number; numCandidates?: number }
 ): Promise<SemanticSearchHit[]> {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    throw new Error("semanticSearch query must not be empty");
-  }
-  return executeVectorSearch(trimmed, options);
+  return executeVectorSearch(requireTrimmedQuery(query, "semanticSearch"), options);
 }
 
 /** Like semanticSearch, but only posts that have been sent (sentAt set). */
@@ -99,11 +103,7 @@ export async function findSimilarSentPosts(
   query: string,
   options?: { limit?: number; numCandidates?: number }
 ): Promise<SemanticSearchHit[]> {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    throw new Error("findSimilarSentPosts query must not be empty");
-  }
-  return executeVectorSearch(trimmed, {
+  return executeVectorSearch(requireTrimmedQuery(query, "findSimilarSentPosts"), {
     ...options,
     filter: { sentAt: { $exists: true } },
   });

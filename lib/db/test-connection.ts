@@ -1,5 +1,6 @@
 // lib/db/test-connection.ts
 // This file is temporary — delete it after step 0.4.8 succeeds.
+import { getErrorMessage } from "@/lib/http/route-error";
 import { getDb } from "./client";
 
 async function main() {
@@ -22,6 +23,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("✗ MongoDB connection failed:", err.message);
+  console.error("✗ MongoDB connection failed:", getErrorMessage(err));
   process.exit(1);
 });
