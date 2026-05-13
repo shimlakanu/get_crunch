@@ -84,6 +84,19 @@ export async function getTopScoredPosts(limit: number = 10): Promise<StoredPost[
     .toArray();
 }
 
+/** HN story ids that already have `sentAt` among the given candidates (already mailed). */
+export async function getSentPostIdsAmong(candidateIds: readonly number[]): Promise<Set<number>> {
+  if (candidateIds.length === 0) return new Set();
+  const collection = await getPostsCollection();
+  const rows = await collection
+    .find(
+      { id: { $in: [...candidateIds] }, sentAt: { $exists: true } },
+      { projection: { id: 1 } }
+    )
+    .toArray();
+  return new Set(rows.map((r) => r.id));
+}
+
 // markPostsSent: record when posts were included in an email.
 // Used Day 2+ for RAG deduplication (don't send the same topic twice this week).
 export async function markPostsSent(postIds: number[]): Promise<void> {

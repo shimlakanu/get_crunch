@@ -34,35 +34,34 @@ Examples:
   {"id": 12347, "score": 2, "reasoning": "Promotional launch post for a SaaS analytics tool with no technical depth or original perspective."}
 ]`;
 
-const MAX_RECENT_DIGEST_TITLES = 40;
+const MAX_TRENDING_DOMAINS_LISTED = 30;
 
-/** Builds the scoring instructions plus optional "recently sent" overlap guidance. */
-export function buildScoringPrompt(recentlySentTitles: string[]): string {
-  const trimmed = recentlySentTitles
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
-  if (trimmed.length === 0) {
+export type BuildScoringPromptInput = {
+  trendingDomains: string[];
+};
+
+/** Scoring instructions plus optional trending-domain boost guidance (HN fetch snapshots). */
+export function buildScoringPrompt(input: BuildScoringPromptInput): string {
+  const domains = [
+    ...new Set(input.trendingDomains.map((d) => d.trim()).filter((d) => d.length > 0)),
+  ].sort((a, b) => a.localeCompare(b));
+
+  if (domains.length === 0) {
     return SCORING_PROMPT_BASE;
   }
 
-  const seen = new Map<string, string>();
-  for (const t of trimmed) {
-    const key = t.toLowerCase();
-    if (!seen.has(key)) seen.set(key, t);
-  }
-  const unique = [...seen.values()];
-  const overflow = unique.length - MAX_RECENT_DIGEST_TITLES;
-  const listed = unique.slice(0, MAX_RECENT_DIGEST_TITLES);
-  const lines = listed.map((t, i) => `${i + 1}. ${t}`).join("\n");
+  const listed = domains.slice(0, MAX_TRENDING_DOMAINS_LISTED);
+  const lines = listed.map((d, i) => `${i + 1}. ${d}`).join("\n");
+  const overflow = domains.length - listed.length;
   const tail =
     overflow > 0
-      ? `\n…plus ${overflow} more recently sent title(s) omitted for length. Treat omitted titles the same: avoid redundant angles.`
+      ? `\n…plus ${overflow} more domain(s) omitted for length.`
       : "";
 
   return `${SCORING_PROMPT_BASE}
 
-RECENT DIGEST — ALREADY SENT (titles only):
-These topics already reached subscribers in recent digests. When scoring candidates below, **penalize** posts that cover the **same angles, themes, or storylines** (not just identical wording). Favor fresh technical angles. Strong overlap with this list should pull **originality** and overall score down unless the post clearly adds substantial new depth or evidence.
+TRENDING DOMAINS (HN fetch signal):
+These hostnames appeared in **each of the last three** HN top-story fetches (consecutive snapshots). They indicate current platform-wide focus—not something to penalize. For candidates whose "domain" field matches one of these hostnames, apply **modest upward pressure** on the **overall** score when the post is already technically solid (depth, value, discussion). Do **not** boost shallow, promotional, or low-signal pages merely because of the domain; do **not** downvote strong posts just because the broad topic is common.
 
 ${lines}${tail}`;
 }

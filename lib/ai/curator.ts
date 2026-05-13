@@ -1,12 +1,9 @@
 // lib/ai/curator.ts
 import { requestSchemaCompletion } from "./fireworks";
 import { CONSISTENCY_PROMPT } from "./prompts";
-import {
-  DEFAULT_SIMILARITY_SEED_N,
-  resolveScoringPreambleContext,
-  type CurateAndRankOptions,
-} from "./scoring-preamble";
+import { resolveScoringPreambleContext } from "./scoring-preamble";
 import type { BatchScoreResponse, HnPost, ScoredPost } from "@/lib/types";
+import { getSentPostIdsAmong } from "@/lib/db/posts";
 import { runStructuredOutputPipeline } from "./structured-output";
 import {
   BATCH_SCORE_SCHEMA,
@@ -164,37 +161,38 @@ Domain: ${extractDomain(post.url)}`;
 
 // curateAndRank: the main function — takes raw posts, returns scored + sorted posts.
 // This is what the cron route calls.
-export async function curateAndRank(
-  posts: HnPost[],
-  options?: CurateAndRankOptions
-): Promise<ScoredPost[]> {
-  console.log(`[curator] Scoring ${posts.length} posts in batches of ${BATCH_SIZE}`);
-
-  const sampleSize = options?.sampleSize ?? DEFAULT_SIMILARITY_SEED_N;
-  // sampleSize <= 0 skips vector similarity and keeps the base-only scoring rubric.
-  const ctx = await resolveScoringPreambleContext(posts, sampleSize);
-  if (sampleSize > 0) {
+export async function curateAndRank(posts: HnPost[]): Promise<ScoredPost[]> {
+  const sentIds = await getSentPostIdsAmong(posts.map((p) => p.id));
+  const eligible = posts.filter((p) => !sentIds.has(p.id));
+  if (eligible.length < posts.length) {
     console.log(
-      `[curator] Similarity seeds=${ctx.seedCount}, deduped recent-sent titles=${ctx.recentTitleCount}`
+      `[curator] Excluding ${posts.length - eligible.length} already-sent post(s) by id`
     );
   }
 
+  console.log(`[curator] Scoring ${eligible.length} posts in batches of ${BATCH_SIZE}`);
+
+  const ctx = await resolveScoringPreambleContext();
+  console.log(`[curator] Trending domains (last 3 fetches): ${ctx.trendingDomainCount}`);
+
   const allScores: BatchScoreResponse[] = [];
 
-  for (let i = 0; i < posts.length; i += BATCH_SIZE) {
-    const batch = posts.slice(i, i + BATCH_SIZE);
-    console.log(`[curator] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(posts.length / BATCH_SIZE)}`);
+  for (let i = 0; i < eligible.length; i += BATCH_SIZE) {
+    const batch = eligible.slice(i, i + BATCH_SIZE);
+    console.log(
+      `[curator] Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(eligible.length / BATCH_SIZE)}`
+    );
 
     const batchScores = await scoreBatch(batch, ctx.preamble);
     allScores.push(...batchScores);
-    if (i + BATCH_SIZE < posts.length) {
+    if (i + BATCH_SIZE < eligible.length) {
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
 
   const scoreMap = new Map(allScores.map((s) => [s.id, s]));
 
-  const scoredPosts: ScoredPost[] = posts
+  const scoredPosts: ScoredPost[] = eligible
     .map((post) => {
       const scoreData = scoreMap.get(post.id);
       return {

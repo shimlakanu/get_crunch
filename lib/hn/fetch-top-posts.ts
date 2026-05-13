@@ -1,3 +1,4 @@
+import { recordFetchDomainSnapshot } from "@/lib/db/fetch-snapshots";
 import { storePosts } from "@/lib/db/posts";
 import type { HnPost, HnRawStory } from "@/lib/types";
 
@@ -45,6 +46,7 @@ export async function fetchTopPostsAndPersist(): Promise<HnPost[]> {
 
   console.log(`[posts] Storing ${posts.length} posts to MongoDB...`);
   await storePosts(posts);
+  await recordFetchDomainSnapshot(posts);
   console.log(`[posts] Done. Returning ${posts.length} posts.`);
 
   return posts;
